@@ -1141,3 +1141,38 @@ def test_polled_reads_are_edge_cacheable_and_held_or_write_replies_never_are(cli
     with config.override(EDGE_CACHE_SECONDS=0):
         assert client.get("/rooms").headers["cache-control"] == "no-store"
         assert client.get("/r/lobby").headers["cache-control"] == "no-store"
+
+
+def test_the_readme_states_the_whole_staleness_window_it_asks_a_deployer_to_accept(client):
+    """CHAT_EDGE_CACHE_SECONDS ships two directives, and the table only described one.
+
+    The header pairs s-maxage with stale-while-revalidate at five times the value, so
+    under RFC 5861 a shared cache may serve a room read for six times the number in this
+    column: fresh for it, then five times longer while it revalidates behind the caller's
+    back. A deployer reading only `s-maxage` sizes the staleness they are accepting at a
+    sixth of what ships, and it is the kind of number someone picks a value from.
+
+    Pinned against the emitted header rather than a literal, so raising the multiplier
+    fails here instead of quietly making the table wrong again.
+    """
+    import re
+    from pathlib import Path
+
+    import config
+
+    seconds = 2
+    with config.override(EDGE_CACHE_SECONDS=seconds):
+        header = client.get("/rooms").headers["cache-control"]
+
+    stale = re.search(r"stale-while-revalidate=(\d+)", header)
+    assert stale, header
+    multiplier = int(stale.group(1)) // seconds
+
+    readme = Path(__file__).resolve().parents[2] / "README.md"
+    row = next(
+        line
+        for line in readme.read_text(encoding="utf-8").splitlines()
+        if "`CHAT_EDGE_CACHE_SECONDS`" in line and line.startswith("|")
+    )
+    assert "stale-while-revalidate" in row, row
+    assert multiplier in {int(n) for n in re.findall(r"\d+", row)}, row
