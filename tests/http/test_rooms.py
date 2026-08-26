@@ -1144,35 +1144,50 @@ def test_polled_reads_are_edge_cacheable_and_held_or_write_replies_never_are(cli
 
 
 def test_the_readme_states_the_whole_staleness_window_it_asks_a_deployer_to_accept(client):
-    """CHAT_EDGE_CACHE_SECONDS ships two directives, and the table only described one.
+    """Both cache knobs ship two directives, and the table described one of them.
 
-    The header pairs s-maxage with stale-while-revalidate at five times the value, so
-    under RFC 5861 a shared cache may serve a room read for six times the number in this
-    column: fresh for it, then five times longer while it revalidates behind the caller's
-    back. A deployer reading only `s-maxage` sizes the staleness they are accepting at a
-    sixth of what ships, and it is the kind of number someone picks a value from.
+    `_edge_cacheable` pairs s-maxage with stale-while-revalidate, so under RFC 5861 a
+    shared cache may serve fresh for the first and then keep serving stale for the second
+    while it revalidates behind the caller. The window a deployer is accepting is the sum,
+    and it is the kind of number someone picks a value from.
 
-    Pinned against the emitted header rather than a literal, so raising the multiplier
-    fails here instead of quietly making the table wrong again.
+    The two rows understate it differently, which is why both are checked here. Polled
+    reads take the default swr of five times the value, so the real window is six times
+    the column. The documents take a flat 60, so theirs is the column plus 60 rather than
+    a multiple of it.
+
+    Both halves are pinned against the emitted header rather than a literal, so changing
+    either number in `_edge_cacheable` fails here instead of quietly making the table
+    wrong again.
     """
     import re
     from pathlib import Path
 
     import config
 
+    def stale_of(header: str) -> int:
+        found = re.search(r"stale-while-revalidate=(\d+)", header)
+        assert found, header
+        return int(found.group(1))
+
+    def row_for(knob: str) -> str:
+        readme = Path(__file__).resolve().parents[2] / "README.md"
+        return next(
+            line
+            for line in readme.read_text(encoding="utf-8").splitlines()
+            if f"`{knob}`" in line and line.startswith("|")
+        )
+
     seconds = 2
     with config.override(EDGE_CACHE_SECONDS=seconds):
-        header = client.get("/rooms").headers["cache-control"]
+        polled = stale_of(client.get("/rooms").headers["cache-control"])
+    edge_row = row_for("CHAT_EDGE_CACHE_SECONDS")
+    assert "stale-while-revalidate" in edge_row, edge_row
+    # A multiple, so the row has to name the multiplier rather than a fixed number.
+    assert polled // seconds in {int(n) for n in re.findall(r"\d+", edge_row)}, edge_row
 
-    stale = re.search(r"stale-while-revalidate=(\d+)", header)
-    assert stale, header
-    multiplier = int(stale.group(1)) // seconds
-
-    readme = Path(__file__).resolve().parents[2] / "README.md"
-    row = next(
-        line
-        for line in readme.read_text(encoding="utf-8").splitlines()
-        if "`CHAT_EDGE_CACHE_SECONDS`" in line and line.startswith("|")
-    )
-    assert "stale-while-revalidate" in row, row
-    assert multiplier in {int(n) for n in re.findall(r"\d+", row)}, row
+    static = stale_of(client.get("/llms.txt").headers["cache-control"])
+    static_row = row_for("CHAT_STATIC_CACHE_SECONDS")
+    assert "stale-while-revalidate" in static_row, static_row
+    # Flat, so the row has to name the seconds themselves.
+    assert static in {int(n) for n in re.findall(r"\d+", static_row)}, static_row
